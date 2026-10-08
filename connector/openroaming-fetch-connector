@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+# openroaming-fetch-connector — neofetch-style status banner for a WBA
+# OpenRoaming Connector, hybrid deployment (radsecproxy + FreeRADIUS + MySQL).
+#
+# Standalone: neofetch is NOT required. Only uses tools already present on a stock
+# Ubuntu/Debian box — hostname, uname, free, df, ss, nsenter, docker, openssl.
+#
+# Every lookup degrades to "n/a" rather than failing, so this is safe to run on a
+# half-configured machine. Docker queries and reading the certificates need root, so:
+#
+#   sudo openroaming-fetch-connector
+
+# ---- deployment settings ----------------------------------------------------
+# Nothing here normally needs setting: the checkout and Compose project are read off the
+# running radsecproxy container. Override any of them from the environment:
+#
+#   CONNECTOR_DIR=/opt/wba-openroaming-connector sudo openroaming-fetch-connector
+#
+# install.sh writes site values to the CONF_FILE below, which is read first so the
+# defaults only fill in what it leaves unset. A login banner runs from MOTD with no
+# environment of yours, so that file is the place for anything permanent.
+CONF_FILE="${CONF_FILE:-/etc/default/openroaming-fetch-connector}"
+# shellcheck source=/dev/null
+[ -r "$CONF_FILE" ] && . "$CONF_FILE"
+
+# Compose stamps every container with its project name and the directory `docker
+# compose up` ran in, which for the hybrid deployment is <checkout>/hybrid. That finds
+# the deployment wherever it lives — /root per the upstream guide, or wherever CI/CD
+# put it.
+if [ -z "${HYBRID_DIR:-}" ] && [ -z "${CONNECTOR_DIR:-}" ]; then
+  DETECTED="$(docker ps -a --filter label=com.docker.compose.service=radsecproxy \
+    --format '{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}' \
+    2>/dev/null | head -1)"
+  if [ -n "$DETECTED" ]; then
+    COMPOSE_PROJECT="${COMPOSE_PROJECT:-${DETECTED%%|*}}"
+    HYBRID_DIR="${DETECTED#*|}"
+    CONNECTOR_DIR="$(dirname "$HYBRID_DIR")"
+  fi
+fi
+CONNECTOR_DIR="${CONNECTOR_DIR:-/root/wba-openroaming-connector}"
+HYBRID_DIR="${HYBRID_DIR:-$CONNECTOR_DIR/hybrid}"
+# Containers are found by their Compose labels rather than by name, so this works
+# whether Docker calls them hybrid-radsecproxy-1 or hybrid_radsecproxy_1.
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "$HYBRID_DIR")}"
+# How far back to count Access-Accept / Access-Reject in the FreeRADIUS log. It runs
+# with -xx, so the log is chatty — a long window makes every login slower.
+AUTH_WINDOW="${AUTH_WINDOW:-1h}"
+REPO_URL="${REPO_URL:-github.com/wireless-broadband-alliance/wba-openroaming-connector}"
+# Header line and support contact.
+TITLE="${TITLE:-WBA OpenRoaming Connector}"
+SUPPORT="${SUPPORT:-jonah@wballiance.com}"
+
+RSP_CONF="$HYBRID_DIR/configs/radsecproxy/radsecproxy.conf"
+WBA_CERT="$HYBRID_DIR/configs/radsecproxy/certs/client.pem"
+RADIUS_CERT_HOST="$CONNECTOR_DIR/certs/freeradius/cert.pem"
+
+# ---- brand colours ----------------------------------------------------------
+# Truecolor escapes taken from the OpenRoaming logo. The navy is lifted from the logo's
+# #002D53, which is close to invisible on a dark terminal — same hue, more light. Keep
+# it clearly distinct from the green or the arcs disappear into the disc.
+#
+#   G (OpenRoaming green)  #7DB928
+#   N (navy, lifted)       #2B6CB0   was #002D53
+#   W (arcs and dot)       #F2F2F2   a touch off pure white, so it sits with the others
+G=$'\033[38;2;125;185;40m'
+N=$'\033[38;2;43;108;176m'
+W=$'\033[38;2;242;242;242m'
+BOLD=$'\033[1m'
+AMBER=$'\033[38;2;220;160;40m'
+RED=$'\033[38;2;210;60;60m'
+GREEN=$'\033[38;2;80;180;80m'
+R=$'\033[0m'
+
+q() { "$@" 2>/dev/null || true; }
+
+ART=(
+  "                 ${G}._gggaa@@@@@@@@@aagg__${R}                 "
+  "             ${G}_ga@@@@@@@@@@@@@@@@@@@@@@@@ag_,${R}            "
+  "         ${G}.ga@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ag,${R}         "
+  "       ${G}_a@@@@@@@@@@@${R}${W}@@@@@@@@@@@@@@@@${R}${G}@@@@@@@@@@@a_${R}       "
+  "     ${G}_a@@@@@@@@@${R}${W}@@@@@@${R}${G}@@@@@@@@@@@@${R}${W}@@@@@@@${R}${G}@@@@@@@@a_${R}     "
+  "    ${G}d@@@@@@@@${R}${W}@@@@${R}${G}@@@@@@@@${R}${W}@@@@@@${R}${G}@@@@@@@@${R}${W}@@@@${R}${G}@@@@@@@@b,${R}   "
+  "  ${G}.d@@@@@@@@@@@@@@@${R}${W}@@@@@@@@@@@@@@@@@@${R}${G}@@@@@@@@@@@@@@@@,${R}  "
+  " ${G}.@@@@@@@${R}${N}@@@${R}${G}@@@@@${R}${W}@@@@${R}${G}@@@@@@@@@@@@@@@${R}${W}@@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@@@@@,${R} "
+  " ${G}d@@@@@@${R}${N}@@@${R}${G}@@@@@@@@@@@@${R}${W}@@@@@@@@@@@${R}${G}@@@@@@@@@@@${R}${N}@@@${R}${G}@@@@@@@,${R}"
+  "${G}]@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@${R}${W}@@${R}${G}@@@@@@@@${R}${W}@@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@[${R}"
+  "${G}@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@${R}${N}@${R}${G}@@@@@@@@@@@@@@${R}${N}@${R}${G}@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@${R}"
+  "${G}@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@${R}${W}@@@@@${R}${G}@@@${R}${N}@@@@${R}${G}@@@${R}${N}@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@${R}"
+  "${G}@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@${R}${W}@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@${R}"
+  "${G}]@@@@@@@${R}${N}@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@@${R}${G}@@@@@@@@${R}${N}@@@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@[${R}"
+  " ${G}q@@@@@@${R}${N}@@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@@${R}${N}@@@@@@@@@@@@${R}${G}@@@@${R}${N}@@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@\`${R}"
+  " ${G}'@@@@@@@${R}${N}@@@@${R}${G}@@@${R}${N}@@@@${R}${G}@@@@@@@@@@@@@@@@${R}${N}@@@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@@@@@\`${R} "
+  "  ${G}'@@@@@@@@${R}${N}@@@${R}${G}@@@@@${R}${N}@@@@@@${R}${G}@@@@@@${R}${N}@@@@@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@@@@@@\`${R}  "
+  "   ${G}'q@@@@@@@@${R}${N}@@@@${R}${G}@@@@@@@${R}${N}@@@@@@@@${R}${G}@@@@@@@${R}${N}@@@@${R}${G}@@@@@@@@p\`${R}   "
+  "     ${G}\"B@@@@@@@@${R}${N}@@@@@@${R}${G}@@@@@@@@@@@@@@${R}${N}@@@@@@${R}${G}@@@@@@@@@P${R}     "
+  "       ${G}\"B@@@@@@@@@@@${R}${N}@@@@@@@@@@@@@@@@${R}${G}@@@@@@@@@@@BP${R}       "
+  "         ${G}'PB@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@P\`${R}         "
+  "            ${G}'\"BB@@@@@@@@@@@@@@@@@@@@@@@@BBP'${R}            "
+  "                 ${G}\"\"PPBBB@@@@@@@@BBBPPP\"\`${R}                "
+)
+
+# ---- helpers ----------------------------------------------------------------
+# Container ID for a Compose service in this project, running or not.
+ctr() {
+  q docker ps -aq \
+    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+    --filter "label=com.docker.compose.service=$1" | head -1
+}
+
+ctr_state() {
+  local state since
+  [ -z "$1" ] && { echo "${RED}not found${R}"; return; }
+  state="$(q docker inspect -f '{{.State.Status}}' "$1")"
+  since="$(q docker inspect -f '{{.State.StartedAt}}' "$1" | cut -dT -f1)"
+  if [ "$state" = "running" ]; then
+    echo "${GREEN}running${R}${since:+ (since $since)}"
+  else
+    echo "${RED}${state:-unknown}${R}"
+  fi
+}
+
+# Certificate end date from a PEM on stdin, as "YYYY-MM-DD (N days left)". Turns amber
+# inside $1 days — WBA certs live for years, Let's Encrypt for 90 days, so the warning
+# window differs per certificate.
+cert_expiry() {
+  local raw pretty end_epoch days
+  raw="$(q openssl x509 -noout -enddate | cut -d= -f2)"
+  [ -z "$raw" ] && return
+  pretty="$(q date -d "$raw" +%Y-%m-%d)"; [ -z "$pretty" ] && pretty="$raw"
+  end_epoch="$(q date -d "$raw" +%s)"
+  [ -z "$end_epoch" ] && { echo "$pretty"; return; }
+  days=$(( (end_epoch - $(date +%s)) / 86400 ))
+  if [ "$days" -lt 0 ]; then
+    echo "${AMBER}${pretty} — EXPIRED${R}"
+  elif [ "$days" -lt "$1" ]; then
+    echo "${AMBER}${pretty} (${days} days left)${R}"
+  else
+    echo "${pretty} (${days} days left)"
+  fi
+}
+
+cert_cn()     { q openssl x509 -noout -subject | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p'; }
+cert_issuer() { q openssl x509 -noout -issuer  | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p'; }
+cert_fp()     { q openssl x509 -noout -fingerprint -sha256 | cut -d= -f2; }
+
+# Coloured up/down for one host port. Ports are published through docker-proxy, so they
+# show up as ordinary listening sockets on the host.
+port_state() {
+  local flag=-Hltn
+  [ "$1" = UDP ] && flag=-Hlun
+  if q ss $flag "sport = :$2" | grep -q .; then
+    echo "${GREEN}$1 $2${R}"
+  else
+    echo "${RED}$1 $2${R}"
+  fi
+}
+
+# ---- system -----------------------------------------------------------------
+HOSTNAME_="$(q hostname -s)"   # short name — GCP hands back a very long FQDN
+OS="$( . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" )"
+[ -n "$OS" ] && OS="$OS $(q uname -m)"
+KERNEL="$(q uname -r)"
+UPTIME="$(q uptime -p | sed 's/^up //')"
+CPU="$(q grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+CORES="$(q nproc)"
+[ -n "$CPU" ] && CPU="$CPU ($CORES)"
+MEM="$(q free -m | awk '/^Mem:/{printf "%dMiB / %dMiB", $3, $2}')"
+DISK="$(q df -h / | awk 'NR==2{printf "%s / %s (%s)", $3, $2, $5}')"
+
+# ---- container stack --------------------------------------------------------
+DOCKER="$(q docker --version | sed 's/Docker version //; s/,.*//')"
+COMPOSE="$(q docker compose version --short)"
+
+RSP_ID="$(ctr radsecproxy)"
+FR_ID="$(ctr freeradius)"
+DB_ID="$(ctr mysql)"
+
+RSP_STATE="$(ctr_state "$RSP_ID")"
+FR_STATE="$(ctr_state "$FR_ID")"
+DB_STATE="$(ctr_state "$DB_ID")"
+
+# radsecproxy is built from source and the Dockerfile records which release in an ENV;
+# FreeRADIUS reports its own version.
+# Both print their version to stderr, so fold it in. Builds that don't record
+# RADSECVERSION fall back to asking the binary.
+RSP_VER="$(q docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$RSP_ID" | sed -n 's/^RADSECVERSION=//p')"
+[ -z "$RSP_VER" ] && RSP_VER="$(docker exec "$RSP_ID" /sbin/radsecproxy -v 2>&1 | grep -o '[0-9]\+\.[0-9]\+\(\.[0-9]\+\)\?' | head -1 || true)"
+# Debian-based FreeRADIUS images name the binary `freeradius`; the entrypoint maps the
+# compose file's `radiusd` onto it, but a plain `docker exec radiusd` finds nothing.
+for bin in radiusd freeradius; do
+  FR_VER="$(docker exec "$FR_ID" "$bin" -v 2>&1 | grep -o 'Version [0-9][0-9.]*' | head -1 | cut -d' ' -f2 || true)"
+  [ -n "$FR_VER" ] && break
+done
+
+# ---- radsec -----------------------------------------------------------------
+# prepare-debian11.sh writes the realm into radsecproxy.conf as an escaped regex:
+#   realm /.*@example\.com$/ {
+REALM="$(q grep -o 'realm /\.\*@[^$]*\$/' "$RSP_CONF" | head -1 | sed 's#realm /\.\*@##; s#\$/##; s#\\##g')"
+
+LISTEN="$(port_state TCP 2083)  $(port_state UDP 11812)  $(port_state UDP 11813)"
+
+# Count sessions from inside the radsecproxy container's network namespace. From the
+# host, inbound sessions terminate on docker-proxy and outbound ones to IDPs are hidden
+# behind NAT, so a host-side ss undercounts both.
+RSP_PID="$(q docker inspect -f '{{.State.Pid}}' "$RSP_ID")"
+PEERS_IN=""; PEERS_OUT=""
+if [ -n "$RSP_PID" ] && [ "$RSP_PID" != "0" ]; then
+  PEERS_IN="$(q nsenter -t "$RSP_PID" -n ss -Htn state established '( sport = :2083 )' | wc -l | tr -d ' ')"
+  PEERS_OUT="$(q nsenter -t "$RSP_PID" -n ss -Htn state established '( dport = :2083 )' | wc -l | tr -d ' ')"
+fi
+[ -n "$PEERS_IN" ] && PEERS="$PEERS_IN in · $PEERS_OUT out to IDPs"
+
+# radsecproxy logs to stderr — fold it in, or every field below reads n/a. The
+# naptr-openroaming.sh script names each discovered IDP "dynamic_radsec.<realm>", so the
+# last one mentioned is the last roaming realm that was routed.
+RSP_LOG="$(docker logs --tail 2000 "$RSP_ID" 2>&1 || true)"
+LAST_IDP="$(echo "$RSP_LOG" | grep -o 'dynamic_radsec\.[A-Za-z0-9._-]*' | tail -1 | sed 's/^dynamic_radsec\.//')"
+# A log with no IDP lookups just means only home-realm users authenticated recently.
+[ -z "$LAST_IDP" ] && [ -n "$RSP_PID" ] && [ "$RSP_PID" != 0 ] && LAST_IDP="none in last 2000 log lines"
+
+# ---- freeradius -------------------------------------------------------------
+# Docker's own --timestamps prefix, rather than parsing FreeRADIUS's format.
+FR_LOG="$(docker logs --timestamps --since "$AUTH_WINDOW" "$FR_ID" 2>&1 || true)"
+ACCEPTS="$(echo "$FR_LOG" | grep -c 'Sent Access-Accept')"
+REJECTS="$(echo "$FR_LOG" | grep -c 'Sent Access-Reject')"
+LAST_ACCEPT="$(echo "$FR_LOG" | grep 'Sent Access-Accept' | tail -1 | cut -c1-19 | tr T ' ')"
+if [ -n "$FR_ID" ]; then
+  AUTHS="${GREEN}${ACCEPTS} accept${R} · "
+  [ "$REJECTS" -gt 0 ] && AUTHS+="${AMBER}${REJECTS} reject${R}" || AUTHS+="0 reject"
+  AUTHS+=" (last $AUTH_WINDOW)"
+fi
+
+# ---- certificates -----------------------------------------------------------
+# Test readability first: a failed `< file` redirect reports before any 2>/dev/null on
+# the same command takes effect, so it would print over the top of the banner.
+if [ -r "$WBA_CERT" ]; then
+  WBA_CN="$(cert_cn < "$WBA_CERT")"
+  WBA_ISSUER="$(cert_issuer < "$WBA_CERT")"
+  WBA_EXP="$(cert_expiry 90 < "$WBA_CERT")"
+fi
+
+# DockerfileFreeRadius COPYs the certificates into the image at build time, so renewing
+# Let's Encrypt on the host changes nothing until the image is rebuilt. Read the cert
+# the running container is actually serving, and flag it when the host copy differs.
+RADIUS_PEM="$(q docker exec "$FR_ID" cat /etc/freeradius/certs/cert.pem)"
+if [ -n "$RADIUS_PEM" ]; then
+  RADIUS_CN="$(echo "$RADIUS_PEM" | cert_cn)"
+  RADIUS_EXP="$(echo "$RADIUS_PEM" | cert_expiry 21)"
+  if [ -r "$RADIUS_CERT_HOST" ] && \
+     [ "$(cert_fp < "$RADIUS_CERT_HOST")" != "$(echo "$RADIUS_PEM" | cert_fp)" ]; then
+    RADIUS_EXP+="  ${AMBER}host copy differs — rebuild freeradius${R}"
+  fi
+fi
+
+# ---- assemble ---------------------------------------------------------------
+# The first label of each section is green and the rest blue, so the sections read as
+# blocks. blank() starts a new section.
+FIRST=1
+row()   { local c="$N"; [ "$FIRST" -eq 1 ] && c="$G"; FIRST=0; INFO+=("${BOLD}${c}$1${R}${2:+: }$2"); }
+blank() { INFO+=(""); FIRST=1; }
+SEP="${N}$(printf '%.0s-' $(seq 1 34))${R}"
+
+INFO=()
+row "$TITLE" ""
+INFO+=("$SEP")
+row "connector@${HOSTNAME_:-unknown}" ""
+INFO+=("$SEP")
+FIRST=1
+row "OS"           "${OS:-n/a}"
+row "Kernel"       "${KERNEL:-n/a}"
+row "Uptime"       "${UPTIME:-n/a}"
+row "CPU"          "${CPU:-n/a}"
+row "Memory"       "${MEM:-n/a}"
+row "Disk"         "${DISK:-n/a}"
+blank
+row "Docker"       "${DOCKER:-n/a}  compose ${COMPOSE:-n/a}"
+row "RadSecProxy"  "${RSP_VER:-n/a}  $RSP_STATE"
+row "FreeRADIUS"   "${FR_VER:-n/a}  $FR_STATE"
+row "MySQL"        "$DB_STATE"
+blank
+row "Home realm"   "${REALM:-n/a}"
+row "Listening"    "$LISTEN"
+row "RadSec peers" "${PEERS:-n/a}"
+row "Last IDP"     "${LAST_IDP:-n/a}"
+row "Auth"         "${AUTHS:-n/a}"
+row "Last accept"  "${LAST_ACCEPT:-n/a}"
+blank
+row "WBA cert"     "${WBA_CN:-n/a}"
+row "WBA expires"  "${WBA_EXP:-n/a}"
+row "WBA issuer"   "${WBA_ISSUER:-n/a}"
+row "RADIUS cert"  "${RADIUS_CN:-n/a}"
+row "RADIUS expires" "${RADIUS_EXP:-n/a}"
+blank
+row "Repo"         "$REPO_URL"
+row "Support"      "$SUPPORT"
+
+BAR1=""; BAR2=""
+for i in $(seq 0 7);  do BAR1+=$'\033[48;5;'"$i"'m   '; done; BAR1+="$R"
+for i in $(seq 8 15); do BAR2+=$'\033[48;5;'"$i"'m   '; done; BAR2+="$R"
+
+RIGHT=("${INFO[@]}" "" "$BAR1" "$BAR2")
+
+rows=${#RIGHT[@]}
+[ ${#ART[@]} -gt "$rows" ] && rows=${#ART[@]}
+OFFSET=$(( (rows - ${#ART[@]}) / 2 ))
+[ "$OFFSET" -lt 0 ] && OFFSET=0
+
+ART_PLAIN="$(printf '%s' "${ART[0]}" | sed $'s/\033\\[[0-9;]*m//g')"
+BLANK="$(printf "%${#ART_PLAIN}s" '')"
+
+echo
+for ((i = 0; i < rows; i++)); do
+  ai=$(( i - OFFSET ))
+  if [ "$ai" -ge 0 ] && [ "$ai" -lt ${#ART[@]} ]; then
+    left="${ART[ai]}"
+  else
+    left="$BLANK"
+  fi
+  printf '%s  %s\n' "$left" "${RIGHT[i]:-}"
+done
+echo

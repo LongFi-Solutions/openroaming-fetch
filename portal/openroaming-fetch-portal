@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+# openroaming-fetch-portal — neofetch-style status banner for a WBA
+# OpenRoaming Provisioning Portal (web + MySQL + memcached).
+#
+# Standalone: neofetch is NOT required. Only uses tools already present on a stock
+# Ubuntu/Debian box — hostname, uname, free, df, curl, docker, openssl.
+#
+# Every lookup degrades to "n/a" rather than failing, so this is safe to run on a
+# half-configured machine. Docker queries need root, so:
+#
+#   sudo openroaming-fetch-portal
+
+# ---- deployment settings ----------------------------------------------------
+# Override any of them from the environment:
+#
+#   PORTAL_URL=https://portal.example.net sudo openroaming-fetch-portal
+#
+# install.sh writes site values to the CONF_FILE below, which is read first so the
+# defaults only fill in what it leaves unset. A login banner runs from MOTD with no
+# environment of yours, so that file is the place for anything permanent.
+CONF_FILE="${CONF_FILE:-/etc/default/openroaming-fetch-portal}"
+# shellcheck source=/dev/null
+[ -r "$CONF_FILE" ] && . "$CONF_FILE"
+
+# Compose stamps every container with its project name and the directory `docker
+# compose up` ran in — the portal checkout. "web" is a common service name, so prefer
+# a container running the portal image.
+if [ -z "${PORTAL_DIR:-}" ]; then
+  WEBS="$(docker ps -a --filter label=com.docker.compose.service=web \
+    --format '{{.Image}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.project.working_dir"}}' \
+    2>/dev/null)"
+  DETECTED="$(echo "$WEBS" | grep -i 'openroaming[^|]*|' | head -1)"
+  [ -z "$DETECTED" ] && DETECTED="$(echo "$WEBS" | head -1)"
+  if [ -n "$DETECTED" ]; then
+    COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(echo "$DETECTED" | cut -d'|' -f2)}"
+    PORTAL_DIR="$(echo "$DETECTED" | cut -d'|' -f3)"
+  fi
+fi
+PORTAL_DIR="${PORTAL_DIR:-/root/wba-openroaming-portal}"
+# Containers are found by their Compose labels rather than by name.
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-$(basename "$PORTAL_DIR")}"
+# The public address users enrol at, checked from the outside, certificate and all.
+# Leave it unset and the banner works it out: the portal redirects plain-HTTP requests
+# to its public https:// address, so asking the local web container gives it away.
+PORTAL_URL="${PORTAL_URL:-}"
+# The web container itself, as published on this host (plain HTTP on port 80).
+LOCAL_URL="${LOCAL_URL:-http://127.0.0.1}"
+REPO_URL="${REPO_URL:-github.com/wireless-broadband-alliance/wba-openroaming-portal}"
+# Header line and support contact.
+TITLE="${TITLE:-WBA OpenRoaming Portal}"
+SUPPORT="${SUPPORT:-jonah@wballiance.com}"
+
+# The RADIUS server certificate, inside the web container. The portal code reads it from
+# here (INSTALLATION.md says public/signing-keys, but the code disagrees), and it is
+# what gets embedded in every profile the portal hands out.
+SIGNING_CERT="/var/www/openroaming/signing-keys/cert.pem"
+
+# ---- brand colours ----------------------------------------------------------
+# Truecolor escapes taken from the OpenRoaming logo. The navy is lifted from the logo's
+# #002D53, which is close to invisible on a dark terminal — same hue, more light. Keep
+# it clearly distinct from the green or the arcs disappear into the disc.
+#
+#   G (OpenRoaming green)  #7DB928
+#   N (navy, lifted)       #2B6CB0   was #002D53
+#   W (arcs and dot)       #F2F2F2   a touch off pure white, so it sits with the others
+G=$'\033[38;2;125;185;40m'
+N=$'\033[38;2;43;108;176m'
+W=$'\033[38;2;242;242;242m'
+BOLD=$'\033[1m'
+AMBER=$'\033[38;2;220;160;40m'
+RED=$'\033[38;2;210;60;60m'
+GREEN=$'\033[38;2;80;180;80m'
+R=$'\033[0m'
+
+q() { "$@" 2>/dev/null || true; }
+
+ART=(
+  "                 ${G}._gggaa@@@@@@@@@aagg__${R}                 "
+  "             ${G}_ga@@@@@@@@@@@@@@@@@@@@@@@@ag_,${R}            "
+  "         ${G}.ga@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ag,${R}         "
+  "       ${G}_a@@@@@@@@@@@${R}${W}@@@@@@@@@@@@@@@@${R}${G}@@@@@@@@@@@a_${R}       "
+  "     ${G}_a@@@@@@@@@${R}${W}@@@@@@${R}${G}@@@@@@@@@@@@${R}${W}@@@@@@@${R}${G}@@@@@@@@a_${R}     "
+  "    ${G}d@@@@@@@@${R}${W}@@@@${R}${G}@@@@@@@@${R}${W}@@@@@@${R}${G}@@@@@@@@${R}${W}@@@@${R}${G}@@@@@@@@b,${R}   "
+  "  ${G}.d@@@@@@@@@@@@@@@${R}${W}@@@@@@@@@@@@@@@@@@${R}${G}@@@@@@@@@@@@@@@@,${R}  "
+  " ${G}.@@@@@@@${R}${N}@@@${R}${G}@@@@@${R}${W}@@@@${R}${G}@@@@@@@@@@@@@@@${R}${W}@@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@@@@@,${R} "
+  " ${G}d@@@@@@${R}${N}@@@${R}${G}@@@@@@@@@@@@${R}${W}@@@@@@@@@@@${R}${G}@@@@@@@@@@@${R}${N}@@@${R}${G}@@@@@@@,${R}"
+  "${G}]@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@${R}${W}@@${R}${G}@@@@@@@@${R}${W}@@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@[${R}"
+  "${G}@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@${R}${N}@${R}${G}@@@@@@@@@@@@@@${R}${N}@${R}${G}@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@${R}"
+  "${G}@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@${R}${W}@@@@@${R}${G}@@@${R}${N}@@@@${R}${G}@@@${R}${N}@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@${R}"
+  "${G}@@@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@${R}${W}@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@${R}"
+  "${G}]@@@@@@@${R}${N}@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@@${R}${G}@@@@@@@@${R}${N}@@@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@[${R}"
+  " ${G}q@@@@@@${R}${N}@@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@@${R}${N}@@@@@@@@@@@@${R}${G}@@@@${R}${N}@@@@${R}${G}@@@${R}${N}@@@${R}${G}@@@@@@@\`${R}"
+  " ${G}'@@@@@@@${R}${N}@@@@${R}${G}@@@${R}${N}@@@@${R}${G}@@@@@@@@@@@@@@@@${R}${N}@@@@${R}${G}@@@@${R}${N}@@@${R}${G}@@@@@@@\`${R} "
+  "  ${G}'@@@@@@@@${R}${N}@@@${R}${G}@@@@@${R}${N}@@@@@@${R}${G}@@@@@@${R}${N}@@@@@@${R}${G}@@@@@${R}${N}@@@${R}${G}@@@@@@@@\`${R}  "
+  "   ${G}'q@@@@@@@@${R}${N}@@@@${R}${G}@@@@@@@${R}${N}@@@@@@@@${R}${G}@@@@@@@${R}${N}@@@@${R}${G}@@@@@@@@p\`${R}   "
+  "     ${G}\"B@@@@@@@@${R}${N}@@@@@@${R}${G}@@@@@@@@@@@@@@${R}${N}@@@@@@${R}${G}@@@@@@@@@P${R}     "
+  "       ${G}\"B@@@@@@@@@@@${R}${N}@@@@@@@@@@@@@@@@${R}${G}@@@@@@@@@@@BP${R}       "
+  "         ${G}'PB@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@P\`${R}         "
+  "            ${G}'\"BB@@@@@@@@@@@@@@@@@@@@@@@@BBP'${R}            "
+  "                 ${G}\"\"PPBBB@@@@@@@@BBBPPP\"\`${R}                "
+)
+
+# ---- helpers ----------------------------------------------------------------
+# Container ID for a Compose service in this project, running or not.
+ctr() {
+  q docker ps -aq \
+    --filter "label=com.docker.compose.project=$COMPOSE_PROJECT" \
+    --filter "label=com.docker.compose.service=$1" | head -1
+}
+
+ctr_state() {
+  local state since
+  [ -z "$1" ] && { echo "${RED}not found${R}"; return; }
+  state="$(q docker inspect -f '{{.State.Status}}' "$1")"
+  since="$(q docker inspect -f '{{.State.StartedAt}}' "$1" | cut -dT -f1)"
+  if [ "$state" = "running" ]; then
+    echo "${GREEN}running${R}${since:+ (since $since)}"
+  else
+    echo "${RED}${state:-unknown}${R}"
+  fi
+}
+
+# Certificate end date from a PEM on stdin, as "YYYY-MM-DD (N days left)", amber inside
+# $1 days.
+cert_expiry() {
+  local raw pretty end_epoch days
+  raw="$(q openssl x509 -noout -enddate | cut -d= -f2)"
+  [ -z "$raw" ] && return
+  pretty="$(q date -d "$raw" +%Y-%m-%d)"; [ -z "$pretty" ] && pretty="$raw"
+  end_epoch="$(q date -d "$raw" +%s)"
+  [ -z "$end_epoch" ] && { echo "$pretty"; return; }
+  days=$(( (end_epoch - $(date +%s)) / 86400 ))
+  if [ "$days" -lt 0 ]; then
+    echo "${AMBER}${pretty} — EXPIRED${R}"
+  elif [ "$days" -lt "$1" ]; then
+    echo "${AMBER}${pretty} (${days} days left)${R}"
+  else
+    echo "${pretty} (${days} days left)"
+  fi
+}
+
+cert_cn() { q openssl x509 -noout -subject | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p'; }
+
+# "up — HTTP 200 in 85ms", coloured, for a URL. Pass -L as $2 to follow redirects.
+http_check() {
+  local code time
+  read -r code time <<<"$(q curl -s -o /dev/null ${2:-} --max-time 8 -w '%{http_code} %{time_total}' "$1")"
+  if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 400 ]; then
+    echo "${GREEN}up${R} — HTTP $code in $(awk -v t="$time" 'BEGIN{printf "%.0f", t*1000}')ms"
+  elif [ -n "$code" ] && [ "$code" != "000" ]; then
+    echo "${RED}error${R} — HTTP $code"
+  else
+    echo "${RED}unreachable${R}"
+  fi
+}
+
+# OSC 8 hyperlink — clickable in iTerm2, Windows Terminal, GNOME Terminal, kitty,
+# WezTerm. Terminals without support ignore the escape and just show the URL.
+link() { printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$1" "${2:-$1}"; }
+
+# ---- system -----------------------------------------------------------------
+HOSTNAME_="$(q hostname -s)"   # short name — GCP hands back a very long FQDN
+OS="$( . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" )"
+[ -n "$OS" ] && OS="$OS $(q uname -m)"
+KERNEL="$(q uname -r)"
+UPTIME="$(q uptime -p | sed 's/^up //')"
+CPU="$(q grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
+CORES="$(q nproc)"
+[ -n "$CPU" ] && CPU="$CPU ($CORES)"
+MEM="$(q free -m | awk '/^Mem:/{printf "%dMiB / %dMiB", $3, $2}')"
+DISK="$(q df -h / | awk 'NR==2{printf "%s / %s (%s)", $3, $2, $5}')"
+
+# ---- container stack --------------------------------------------------------
+DOCKER="$(q docker --version | sed 's/Docker version //; s/,.*//')"
+COMPOSE="$(q docker compose version --short)"
+
+WEB_ID="$(ctr web)"
+DB_ID="$(ctr mysql)"
+MC_ID="$(ctr memcached)"
+
+WEB_STATE="$(ctr_state "$WEB_ID")"
+DB_STATE="$(ctr_state "$DB_ID")"
+MC_STATE="$(ctr_state "$MC_ID")"
+
+# The release lives in composer.json — the same place the portal's own metrics read it.
+# The image tag is shown too when it says something else, e.g. a CI tag like
+# "production".
+VERSION="$(q docker exec "$WEB_ID" php -r 'echo json_decode(file_get_contents("/var/www/openroaming/composer.json"))->version ?? "";')"
+IMAGE="$(q docker inspect -f '{{.Config.Image}}' "$WEB_ID")"
+TAG="${IMAGE##*:}"; [ "$TAG" = "$IMAGE" ] && TAG=""
+[ -n "$TAG" ] && [ "$TAG" != "$VERSION" ] && VERSION="${VERSION:+$VERSION }(image: $TAG)"
+
+# supervisord inside the web container runs nginx, php-fpm and the Symfony scheduler
+# (which replaced the old cron jobs). Any of them can die while the container stays up,
+# so check each process. docker top needs a pid column in its ps output to work out
+# which processes belong to the container, hence pid,args rather than just args.
+PROCS=""
+if [ -n "$WEB_ID" ]; then
+  TOP="$(q docker top "$WEB_ID" -o pid,args)"
+  for p in "nginx:nginx: master" "php-fpm:php-fpm: master" "scheduler:messenger:consume"; do
+    name="${p%%:*}"; pattern="${p#*:}"
+    if echo "$TOP" | grep -q "$pattern"; then
+      PROCS+="${GREEN}${name}${R}  "
+    else
+      PROCS+="${RED}${name}${R}  "
+    fi
+  done
+fi
+
+# ---- reachability -----------------------------------------------------------
+# Don't follow redirects locally: a redirect from the web container proves it is serving,
+# and following it would leave this host and test the public path instead.
+LOCAL_STATUS="$(http_check "$LOCAL_URL")"
+
+if [ -z "$PORTAL_URL" ] || [ "$PORTAL_URL" = "https://portal.example.com" ]; then
+  REDIRECT="$(q curl -s -o /dev/null --max-time 5 -w '%{redirect_url}' "$LOCAL_URL/")"
+  PORTAL_URL="$(echo "$REDIRECT" | sed -n -E 's#^(https?://[^/:]+).*#\1#p')"
+  case "$PORTAL_URL" in *127.0.0.1*|*localhost*) PORTAL_URL="" ;; esac
+  [ -n "$PORTAL_URL" ] && PORTAL_URL_NOTE=" (detected)"
+fi
+
+PUBLIC_STATUS=""; PUBLIC_TLS=""
+if [ -n "$PORTAL_URL" ]; then
+  PUBLIC_STATUS="$(http_check "$PORTAL_URL" -L)"
+  PORTAL_HOST="$(echo "$PORTAL_URL" | sed -E 's#^[a-z]+://##; s#[/:].*##')"
+  case "$PORTAL_URL" in
+    https://*)
+      PUBLIC_TLS="$(q timeout 8 openssl s_client -connect "$PORTAL_HOST:443" -servername "$PORTAL_HOST" </dev/null | cert_expiry 21)"
+      ;;
+  esac
+fi
+
+# The portal writes enrolled users straight into the connector's FreeRADIUS database.
+# Pull only host and port out of DATABASE_FREERADIUS_URL — never the credentials — and
+# test the connection from inside the web container, where the portal itself connects.
+# PHP is the one tool guaranteed to be in that image.
+FR_DB=""
+FR_URL="$(q docker exec "$WEB_ID" printenv DATABASE_FREERADIUS_URL)"
+if [ -n "$FR_URL" ]; then
+  FR_HOSTPORT="$(echo "$FR_URL" | sed -E 's#^[a-z]+://##; s#^.*@##; s#[/?].*##')"
+  FR_H="${FR_HOSTPORT%:*}"; FR_P="${FR_HOSTPORT##*:}"
+  [ "$FR_P" = "$FR_HOSTPORT" ] && FR_P=3306
+  unset FR_URL
+  # Not q() here — it swallows the exit status, and that status is the whole test.
+  if docker exec "$WEB_ID" php -r \
+       '$s = @fsockopen($argv[1], (int)$argv[2], $e, $m, 3); exit($s ? 0 : 1);' \
+       "$FR_H" "$FR_P" >/dev/null 2>&1; then
+    FR_DB="${GREEN}reachable${R} — $FR_H:$FR_P"
+  else
+    FR_DB="${RED}unreachable${R} — $FR_H:$FR_P"
+  fi
+fi
+
+# ---- profiles ---------------------------------------------------------------
+# The RADIUS server certificate baked into every profile. Usually Let's Encrypt, so it
+# expires every 90 days — and when it does, devices refuse to connect.
+SIGNING_PEM="$(q docker exec "$WEB_ID" cat "$SIGNING_CERT")"
+[ -z "$SIGNING_PEM" ] && [ -r "$PORTAL_DIR/signing-keys/cert.pem" ] && \
+  SIGNING_PEM="$(cat "$PORTAL_DIR/signing-keys/cert.pem")"
+if [ -n "$SIGNING_PEM" ]; then
+  SIGNING_CN="$(echo "$SIGNING_PEM" | cert_cn)"
+  SIGNING_EXP="$(echo "$SIGNING_PEM" | cert_expiry 21)"
+fi
+
+# ---- users ------------------------------------------------------------------
+# Counted straight from the portal database, using the credentials the mysql container
+# already holds in its own environment — nothing is read from .env or shown here. The
+# Prometheus /metrics endpoint has the same numbers, but it is off by default and
+# IP-restricted, so it can't be relied on.
+USERS=""; PROFILES=""
+COUNTS="$(q docker exec "$DB_ID" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B "${MYSQL_DATABASE:-openroaming}" -e "
+  SELECT COUNT(*), COALESCE(SUM(isVerified = 1), 0), COALESCE(SUM(bannedAt IS NOT NULL), 0)
+    FROM User WHERE deletedAt IS NULL;
+  SELECT COALESCE(SUM(status = 1), 0), COALESCE(SUM(status = 2), 0) FROM UserRadiusProfile;"')"
+if [ -n "$COUNTS" ]; then
+  read -r U_TOTAL U_VER U_BAN <<<"$(echo "$COUNTS" | sed -n 1p)"
+  read -r P_ACTIVE P_REVOKED <<<"$(echo "$COUNTS" | sed -n 2p)"
+  [ -n "$U_TOTAL" ] && USERS="$U_TOTAL total · $U_VER verified · $U_BAN banned"
+  [ -n "$P_ACTIVE" ] && PROFILES="$P_ACTIVE active · $P_REVOKED revoked"
+fi
+
+# ---- assemble ---------------------------------------------------------------
+# The first label of each section is green and the rest blue, so the sections read as
+# blocks. blank() starts a new section.
+FIRST=1
+row()   { local c="$N"; [ "$FIRST" -eq 1 ] && c="$G"; FIRST=0; INFO+=("${BOLD}${c}$1${R}${2:+: }$2"); }
+blank() { INFO+=(""); FIRST=1; }
+SEP="${N}$(printf '%.0s-' $(seq 1 34))${R}"
+
+INFO=()
+row "$TITLE" ""
+INFO+=("$SEP")
+row "portal@${HOSTNAME_:-unknown}" ""
+INFO+=("$SEP")
+FIRST=1
+row "OS"           "${OS:-n/a}"
+row "Kernel"       "${KERNEL:-n/a}"
+row "Uptime"       "${UPTIME:-n/a}"
+row "CPU"          "${CPU:-n/a}"
+row "Memory"       "${MEM:-n/a}"
+row "Disk"         "${DISK:-n/a}"
+blank
+row "Docker"       "${DOCKER:-n/a}  compose ${COMPOSE:-n/a}"
+row "Portal"       "${VERSION:-n/a}  $WEB_STATE"
+row "Processes"    "${PROCS:-n/a}"
+row "MySQL"        "$DB_STATE"
+row "Memcached"    "$MC_STATE"
+blank
+if [ -n "$PORTAL_URL" ]; then
+  row "URL"        "$(link "$PORTAL_URL")${PORTAL_URL_NOTE:-}"
+else
+  row "URL"        "not set — add PORTAL_URL to $CONF_FILE"
+fi
+row "Public"       "${PUBLIC_STATUS:-n/a}"
+row "Public TLS"   "${PUBLIC_TLS:-n/a}"
+row "Local web"    "$LOCAL_STATUS"
+row "RADIUS DB"    "${FR_DB:-n/a}"
+blank
+row "Profile cert" "${SIGNING_CN:-n/a}"
+row "Cert expires" "${SIGNING_EXP:-n/a}"
+row "Users"        "${USERS:-n/a}"
+row "Profiles"     "${PROFILES:-n/a}"
+blank
+row "Repo"         "$REPO_URL"
+row "Support"      "$SUPPORT"
+
+BAR1=""; BAR2=""
+for i in $(seq 0 7);  do BAR1+=$'\033[48;5;'"$i"'m   '; done; BAR1+="$R"
+for i in $(seq 8 15); do BAR2+=$'\033[48;5;'"$i"'m   '; done; BAR2+="$R"
+
+RIGHT=("${INFO[@]}" "" "$BAR1" "$BAR2")
+
+rows=${#RIGHT[@]}
+[ ${#ART[@]} -gt "$rows" ] && rows=${#ART[@]}
+OFFSET=$(( (rows - ${#ART[@]}) / 2 ))
+[ "$OFFSET" -lt 0 ] && OFFSET=0
+
+ART_PLAIN="$(printf '%s' "${ART[0]}" | sed $'s/\033\\[[0-9;]*m//g')"
+BLANK="$(printf "%${#ART_PLAIN}s" '')"
+
+echo
+for ((i = 0; i < rows; i++)); do
+  ai=$(( i - OFFSET ))
+  if [ "$ai" -ge 0 ] && [ "$ai" -lt ${#ART[@]} ]; then
+    left="${ART[ai]}"
+  else
+    left="$BLANK"
+  fi
+  printf '%s  %s\n' "$left" "${RIGHT[i]:-}"
+done
+echo
