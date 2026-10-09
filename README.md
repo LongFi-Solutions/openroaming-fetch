@@ -57,14 +57,49 @@ Nothing to install. Only tools already on a stock Ubuntu or Debian host:
 
 ## Install
 
-On the server, as root:
+Get the files onto the server one of two ways, then run the installer. Either way, use `connector` on a connector server and `portal` on a portal server.
+
+### Option 1: clone on the server
+
+If the server can reach GitHub:
 
 ```bash
 git clone https://github.com/preston-longfi/openroaming-fetch.git
 cd openroaming-fetch
-sudo ./install.sh connector      # on a connector server
-sudo ./install.sh portal         # on a portal server
+sudo ./install.sh connector
 ```
+
+### Option 2: copy from your computer
+
+If the server can't reach GitHub, or you'd rather not clone onto it, download the repo on your own computer and copy it across.
+
+1. On your computer, get the repo, either by cloning it:
+
+   ```bash
+   git clone https://github.com/preston-longfi/openroaming-fetch.git
+   ```
+
+   or by clicking **Code → Download ZIP** on the GitHub page and unzipping it. The unzipped folder is called `openroaming-fetch-main`.
+
+2. Copy the folder to the server. Use the folder name from step 1, and the user and address you normally SSH in with:
+
+   ```bash
+   scp -r openroaming-fetch you@your-server:/tmp/
+   ```
+
+3. Log in to the server and run the installer from the copied folder:
+
+   ```bash
+   ssh you@your-server
+   cd /tmp/openroaming-fetch
+   sudo bash install.sh connector
+   ```
+
+   `sudo bash install.sh` works even if the copy lost the file's executable permission, which some ZIP tools drop.
+
+Once it's installed, the copy in `/tmp` can be deleted — the installer has put everything it needs in `/usr/local/bin` and `/etc/default`.
+
+### What the installer does
 
 The installer copies the banner to `/usr/local/bin`, finds the deployment from its running containers, and runs the banner once so you can see it. It asks three questions:
 
@@ -74,11 +109,15 @@ The installer copies the banner to `/usr/local/bin`, finds the deployment from i
 
 It only asks anything else when it can't detect the answer. It also checks that you picked the right banner for the server, and stops if you didn't. To skip the questions and take what it detects, add `--yes`.
 
-To upgrade later, pull and run the installer again — it keeps your settings:
+### Upgrade and remove
+
+To upgrade, get the new files the same way you installed and run the installer again. It keeps your settings and your login banner choice. With a clone on the server:
 
 ```bash
 git pull && sudo ./install.sh connector
 ```
+
+With a copy, copy the folder across again (step 2 above) and re-run `sudo bash install.sh connector` from it.
 
 To remove it:
 
