@@ -49,6 +49,9 @@ REPO_URL="${REPO_URL:-github.com/wireless-broadband-alliance/wba-openroaming-por
 # Header line and support contact.
 TITLE="${TITLE:-WBA OpenRoaming Portal}"
 SUPPORT="${SUPPORT:-jonah@wballiance.com}"
+# Your organisation, shown under the title. Left unset, it is taken from the portal's
+# own Display Name setting.
+ORG="${ORG:-}"
 
 # The RADIUS server certificate, inside the web container. The portal code reads it from
 # here (INSTALLATION.md says public/signing-keys, but the code disagrees), and it is
@@ -212,10 +215,17 @@ fi
 # and following it would leave this host and test the public path instead.
 LOCAL_STATUS="$(http_check "$LOCAL_URL")"
 
+# Detect the public address, first match wins:
+#   1. where the web container redirects a plain-HTTP request, when that's absolute
+#   2. DEFAULT_URI — Symfony's base for generated links, which the portal's .env tells
+#      operators to set to their DNS name
+#   3. the host in SAML_SP_ACS_URL, which has to be public for SAML logins to work
+# Anything still pointing at localhost is a leftover sample value and is skipped.
+url_base() { sed -n -E 's#^(https?://[^/:]+).*#\1#p' | grep -v -e 127.0.0.1 -e localhost -e example.com; }
 if [ -z "$PORTAL_URL" ] || [ "$PORTAL_URL" = "https://portal.example.com" ]; then
-  REDIRECT="$(q curl -s -o /dev/null --max-time 5 -w '%{redirect_url}' "$LOCAL_URL/")"
-  PORTAL_URL="$(echo "$REDIRECT" | sed -n -E 's#^(https?://[^/:]+).*#\1#p')"
-  case "$PORTAL_URL" in *127.0.0.1*|*localhost*) PORTAL_URL="" ;; esac
+  PORTAL_URL="$(q curl -s -o /dev/null --max-time 5 -w '%{redirect_url}' "$LOCAL_URL/" | url_base)"
+  [ -z "$PORTAL_URL" ] && PORTAL_URL="$(q docker exec "$WEB_ID" printenv DEFAULT_URI | url_base)"
+  [ -z "$PORTAL_URL" ] && PORTAL_URL="$(q docker exec "$WEB_ID" printenv SAML_SP_ACS_URL | url_base)"
   [ -n "$PORTAL_URL" ] && PORTAL_URL_NOTE=" (detected)"
 fi
 
@@ -267,16 +277,26 @@ fi
 # already holds in its own environment — nothing is read from .env or shown here. The
 # Prometheus /metrics endpoint has the same numbers, but it is off by default and
 # IP-restricted, so it can't be relied on.
-USERS=""; PROFILES=""
+#
+# The same query reads two portal settings: the operator's display name (the default
+# for ORG) and the platform mode. "EditMe" is what fresh installs ship with.
+USERS=""; PROFILES=""; MODE=""
 COUNTS="$(q docker exec "$DB_ID" sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -B "${MYSQL_DATABASE:-openroaming}" -e "
   SELECT COUNT(*), COALESCE(SUM(isVerified = 1), 0), COALESCE(SUM(bannedAt IS NOT NULL), 0)
     FROM User WHERE deletedAt IS NULL;
-  SELECT COALESCE(SUM(status = 1), 0), COALESCE(SUM(status = 2), 0) FROM UserRadiusProfile;"')"
+  SELECT COALESCE(SUM(status = 1), 0), COALESCE(SUM(status = 2), 0) FROM UserRadiusProfile;
+  SELECT name, value FROM Setting WHERE name IN (\"DISPLAY_NAME\", \"PLATFORM_MODE\");"')"
 if [ -n "$COUNTS" ]; then
   read -r U_TOTAL U_VER U_BAN <<<"$(echo "$COUNTS" | sed -n 1p)"
   read -r P_ACTIVE P_REVOKED <<<"$(echo "$COUNTS" | sed -n 2p)"
   [ -n "$U_TOTAL" ] && USERS="$U_TOTAL total · $U_VER verified · $U_BAN banned"
   [ -n "$P_ACTIVE" ] && PROFILES="$P_ACTIVE active · $P_REVOKED revoked"
+  DISPLAY_NAME="$(echo "$COUNTS" | awk -F'\t' '$1 == "DISPLAY_NAME" {print $2}')"
+  [ -z "$ORG" ] && [ "$DISPLAY_NAME" != "EditMe" ] && ORG="$DISPLAY_NAME"
+  # Demo mode is meant for trying the portal out — fine on a test box, a surprise on a
+  # production one, so it shows amber.
+  MODE="$(echo "$COUNTS" | awk -F'\t' '$1 == "PLATFORM_MODE" {print $2}')"
+  [ "$MODE" = "Demo" ] && MODE="${AMBER}Demo${R}"
 fi
 
 # ---- assemble ---------------------------------------------------------------
@@ -289,6 +309,7 @@ SEP="${N}$(printf '%.0s-' $(seq 1 34))${R}"
 
 INFO=()
 row "$TITLE" ""
+[ -n "$ORG" ] && row "$ORG" ""
 INFO+=("$SEP")
 row "portal@${HOSTNAME_:-unknown}" ""
 INFO+=("$SEP")
@@ -302,6 +323,7 @@ row "Disk"         "${DISK:-n/a}"
 blank
 row "Docker"       "${DOCKER:-n/a}  compose ${COMPOSE:-n/a}"
 row "Portal"       "${VERSION:-n/a}  $WEB_STATE"
+row "Mode"         "${MODE:-n/a}"
 row "Processes"    "${PROCS:-n/a}"
 row "MySQL"        "$DB_STATE"
 row "Memcached"    "$MC_STATE"

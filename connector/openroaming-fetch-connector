@@ -49,6 +49,9 @@ REPO_URL="${REPO_URL:-github.com/wireless-broadband-alliance/wba-openroaming-con
 # Header line and support contact.
 TITLE="${TITLE:-WBA OpenRoaming Connector}"
 SUPPORT="${SUPPORT:-jonah@wballiance.com}"
+# Your organisation, shown under the title. Left unset, it is taken from the O= field of
+# your WBA certificate, which the WBA issues in your organisation's name.
+ORG="${ORG:-}"
 
 RSP_CONF="$HYBRID_DIR/configs/radsecproxy/radsecproxy.conf"
 WBA_CERT="$HYBRID_DIR/configs/radsecproxy/certs/client.pem"
@@ -141,6 +144,7 @@ cert_expiry() {
 
 cert_cn()     { q openssl x509 -noout -subject | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p'; }
 cert_issuer() { q openssl x509 -noout -issuer  | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p'; }
+cert_org()    { q openssl x509 -noout -subject | sed -n 's/.*[,=/ ]O *= *\([^,/]*\).*/\1/p'; }
 cert_fp()     { q openssl x509 -noout -fingerprint -sha256 | cut -d= -f2; }
 
 # Coloured up/down for one host port. Ports are published through docker-proxy, so they
@@ -236,6 +240,7 @@ fi
 if [ -r "$WBA_CERT" ]; then
   WBA_CN="$(cert_cn < "$WBA_CERT")"
   WBA_ISSUER="$(cert_issuer < "$WBA_CERT")"
+  [ -z "$ORG" ] && ORG="$(cert_org < "$WBA_CERT")"
   WBA_EXP="$(cert_expiry 90 < "$WBA_CERT")"
 fi
 
@@ -262,6 +267,7 @@ SEP="${N}$(printf '%.0s-' $(seq 1 34))${R}"
 
 INFO=()
 row "$TITLE" ""
+[ -n "$ORG" ] && row "$ORG" ""
 INFO+=("$SEP")
 row "connector@${HOSTNAME_:-unknown}" ""
 INFO+=("$SEP")

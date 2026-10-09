@@ -130,6 +130,24 @@ write_conf() {
   say "wrote $CONF"
 }
 
+# Organisation name and support contact — the two things only a person can answer.
+# Sets ORG_LINE and SUPPORT_LINE for the config file. $1 is what the banner would show
+# on its own (may be empty), $2 says where that comes from.
+ask_identity() {
+  ask ORG_IN "organisation name shown under the title ($2)" "$1"
+  if [ -n "$ORG_IN" ] && [ "$ORG_IN" != "$1" ]; then
+    ORG_LINE="ORG=\"$ORG_IN\""
+  else
+    ORG_LINE="#ORG=\"${1:-Example Wireless}\""
+  fi
+  ask SUPPORT_IN "support contact shown at the bottom" "jonah@wballiance.com"
+  if [ "$SUPPORT_IN" != "jonah@wballiance.com" ]; then
+    SUPPORT_LINE="SUPPORT=\"$SUPPORT_IN\""
+  else
+    SUPPORT_LINE='#SUPPORT="jonah@wballiance.com"'
+  fi
+}
+
 if [ "$TARGET" = connector ] || [ "$TARGET" = portal ]; then
   if [ -e "$CONF" ]; then
     say "keeping existing $CONF"
@@ -148,6 +166,11 @@ if [ "$TARGET" = connector ] || [ "$TARGET" = portal ]; then
         DIR_LINE="CONNECTOR_DIR=\"$CONNECTOR_DIR\""
       fi
     fi
+    # The WBA issues your client certificate in your organisation's name.
+    HYB="${FOUND#*|}"; [ -n "$FOUND" ] || HYB="$CONNECTOR_DIR/hybrid"
+    CERT_ORG="$(openssl x509 -noout -subject -in "$HYB/configs/radsecproxy/certs/client.pem" 2>/dev/null \
+      | sed -n 's/.*[,=/ ]O *= *\([^,/]*\).*/\1/p' || true)"
+    ask_identity "$CERT_ORG" "blank = none; default is from your WBA certificate"
     write_conf <<EOF
 # Settings for $NAME. Read every time it runs, including from MOTD.
 # Everything commented out is detected at run time; uncomment to override.
@@ -163,9 +186,11 @@ $DIR_LINE
 
 #REPO_URL="github.com/wireless-broadband-alliance/wba-openroaming-connector"
 
-# Header line and support contact.
+# Header line, the organisation shown under it (defaults to the O= field of your WBA
+# certificate), and the support contact.
 #TITLE="WBA OpenRoaming Connector"
-#SUPPORT="jonah@wballiance.com"
+$ORG_LINE
+$SUPPORT_LINE
 EOF
   else
     FOUND="$(compose_home web openroaming)"
@@ -182,10 +207,19 @@ EOF
         DIR_LINE="PORTAL_DIR=\"$PORTAL_DIR\""
       fi
     fi
-    # The portal redirects plain HTTP to its public https:// address, so the local web
-    # container can tell us the URL. Only ask when it doesn't.
-    DETECTED="$(curl -s -o /dev/null --max-time 5 -w '%{redirect_url}' http://127.0.0.1/ 2>/dev/null \
-      | sed -n -E 's#^(https?://[^/:]+).*#\1#p' | grep -v -e 127.0.0.1 -e localhost || true)"
+    # Same order the banner uses: the web container's redirect, then DEFAULT_URI, then
+    # the SAML address. Only ask when none of them names a public host.
+    url_base() { sed -n -E 's#^(https?://[^/:]+).*#\1#p' | grep -v -e 127.0.0.1 -e localhost -e example.com || true; }
+    WEB_ID="$(docker ps -q --filter label=com.docker.compose.service=web 2>/dev/null | head -1 || true)"
+    # Each lookup is allowed to fail (no portal answering, variable unset): under set -e
+    # and pipefail a failed curl would otherwise end the install right here.
+    DETECTED="$(curl -s -o /dev/null --max-time 5 -w '%{redirect_url}' http://127.0.0.1/ 2>/dev/null | url_base || true)"
+    if [ -z "$DETECTED" ] && [ -n "$WEB_ID" ]; then
+      DETECTED="$(docker exec "$WEB_ID" printenv DEFAULT_URI 2>/dev/null | url_base || true)"
+    fi
+    if [ -z "$DETECTED" ] && [ -n "$WEB_ID" ]; then
+      DETECTED="$(docker exec "$WEB_ID" printenv SAML_SP_ACS_URL 2>/dev/null | url_base || true)"
+    fi
     if [ -n "$DETECTED" ]; then
       say "found the public portal URL: $DETECTED"
       URL_LINE="#PORTAL_URL=\"$DETECTED\""
@@ -198,6 +232,7 @@ EOF
         URL_LINE='#PORTAL_URL="https://portal.example.com"'
       fi
     fi
+    ask_identity "" "blank = use the portal's Display Name setting"
     write_conf <<EOF
 # Settings for $NAME. Read every time it runs, including from MOTD.
 # Everything commented out is detected at run time; uncomment to override.
@@ -216,15 +251,25 @@ $URL_LINE
 
 #REPO_URL="github.com/wireless-broadband-alliance/wba-openroaming-portal"
 
-# Header line and support contact.
+# Header line, the organisation shown under it (defaults to the portal's Display Name
+# setting), and the support contact.
 #TITLE="WBA OpenRoaming Portal"
-#SUPPORT="jonah@wballiance.com"
+$ORG_LINE
+$SUPPORT_LINE
 EOF
   fi
 fi
 
 # ---- login banner -----------------------------------------------------------
 # MOTD scripts run as root via pam_motd, so the login banner gets the full picture.
+# Without --motd, offer it — unless it's already on (an upgrade keeps it) or nobody is
+# at the keyboard to answer.
+if [ -e "$MOTD_FILE" ]; then
+  MOTD=1
+elif [ "$MOTD" -eq 0 ] && [ "$YES" -eq 0 ] && [ -t 0 ] && [ -d "$MOTD_DIR" ]; then
+  read -r -p "    show this banner every time someone logs in? [Y/n]: " reply
+  case "$reply" in n|N|no|NO) ;; *) MOTD=1 ;; esac
+fi
 if [ "$MOTD" -eq 1 ]; then
   if [ -d "$MOTD_DIR" ]; then
     printf '#!/bin/sh\n%s\n' "$BIN" > "$MOTD_FILE"

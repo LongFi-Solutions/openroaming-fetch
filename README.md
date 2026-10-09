@@ -4,9 +4,15 @@ neofetch-style login banners for [WBA OpenRoaming](https://wballiance.com/openro
 
 Alongside the usual OS and hardware lines, each one reports what you actually need to know about that server at a glance: whether the containers are up, whether RadSec is connected, how authentication is going, whether the portal is reachable from outside, and when each certificate expires.
 
+![openroaming-fetch on a connector](images/connector.png)
+
+![openroaming-fetch on a portal](images/portal.png)
+
 ---
 
 ## What it shows
+
+Both banners put your organisation's name under the WBA OpenRoaming title. The connector reads it from your WBA certificate and the portal from its Display Name setting, or you can set it yourself.
 
 **Connector** (`openroaming-fetch-connector`)
 
@@ -28,6 +34,7 @@ The RADIUS certificate is copied into the FreeRADIUS image at build time, so ren
 | Row | Where it comes from |
 |---|---|
 | Portal | Release from the portal's `composer.json`, plus the image tag if it differs |
+| Mode | The portal's platform mode — Live, or Demo in amber |
 | Processes | nginx, php-fpm and the Symfony scheduler inside the web container, each checked separately |
 | MySQL, Memcached | Container state |
 | URL / Public / Public TLS | The public portal address — detected from the portal's own redirect — checked from outside, with its certificate expiry |
@@ -53,19 +60,19 @@ Nothing to install. Only tools already on a stock Ubuntu or Debian host:
 On the server, as root:
 
 ```bash
-git clone https://github.com/<owner>/openroaming-fetch.git
+git clone https://github.com/preston-longfi/openroaming-fetch.git
 cd openroaming-fetch
 sudo ./install.sh connector      # on a connector server
 sudo ./install.sh portal         # on a portal server
 ```
 
-The installer copies the banner to `/usr/local/bin`, finds the deployment from its running containers, and runs the banner once so you can see it. It only asks a question when it can't detect the answer. It also checks that you picked the right banner for the server, and stops if you didn't.
+The installer copies the banner to `/usr/local/bin`, finds the deployment from its running containers, and runs the banner once so you can see it. It asks three questions:
 
-Add `--motd` to show the banner on every SSH and console login:
+- your organisation name, suggesting the one it detected
+- a support contact
+- whether to show the banner every time someone logs in (see [Login banner](#login-banner))
 
-```bash
-sudo ./install.sh connector --motd
-```
+It only asks anything else when it can't detect the answer. It also checks that you picked the right banner for the server, and stops if you didn't. To skip the questions and take what it detects, add `--yes`.
 
 To upgrade later, pull and run the installer again — it keeps your settings:
 
@@ -78,6 +85,50 @@ To remove it:
 ```bash
 sudo ./install.sh connector --uninstall
 ```
+
+### Login banner
+
+The banner can run on every SSH and console login, through Ubuntu and Debian's `update-motd`. The installer offers this; to turn it on later, run the installer again with `--motd`:
+
+```bash
+sudo ./install.sh connector --motd
+```
+
+Or by hand, without the installer:
+
+```bash
+sudo tee /etc/update-motd.d/99-openroaming-fetch-connector >/dev/null <<'EOF'
+#!/bin/sh
+/usr/local/bin/openroaming-fetch-connector
+EOF
+sudo chmod +x /etc/update-motd.d/99-openroaming-fetch-connector
+```
+
+(On a portal server, use `portal` in place of `connector` throughout.)
+
+Test it without logging out:
+
+```bash
+sudo run-parts /etc/update-motd.d/
+```
+
+The `99-` prefix puts it after Ubuntu's own login messages. To have it on its own, switch off the noisiest of those:
+
+```bash
+sudo chmod -x /etc/update-motd.d/10-help-text /etc/update-motd.d/50-motd-news
+```
+
+To turn the login banner off again but keep the command, delete the file:
+
+```bash
+sudo rm /etc/update-motd.d/99-openroaming-fetch-connector
+```
+
+Worth knowing:
+
+- The banner makes a few Docker calls, which adds a second or two to each login.
+- If nothing shows at login, check for a `~/.hushlogin` file, which hides all login messages for that user.
+- Upgrading with the installer keeps the login banner on if it was on.
 
 ### Why root
 
@@ -99,7 +150,8 @@ Each file lists every setting, commented out. Uncomment a line to override it. T
 | `CONNECTOR_DIR`, `HYBRID_DIR`, `COMPOSE_PROJECT` | connector | Read off the running radsecproxy container |
 | `AUTH_WINDOW` | connector | `1h` |
 | `PORTAL_DIR`, `COMPOSE_PROJECT` | portal | Read off the running web container |
-| `PORTAL_URL` | portal | Detected from the portal's redirect to its public address |
+| `PORTAL_URL` | portal | Detected from the portal's redirect, `DEFAULT_URI` or `SAML_SP_ACS_URL` — or asked for at install |
+| `ORG` | both | Detected — WBA certificate on the connector, Display Name on the portal |
 | `TITLE`, `SUPPORT` | both | The header line and support contact |
 
 ---
@@ -112,7 +164,7 @@ Each file lists every setting, commented out. Uncomment a line to override it. T
 | Containers show `not found` | Not a Compose deployment, or a different Compose project — set `COMPOSE_PROJECT` |
 | `Listening` ports red on a working connector | Docker's userland proxy is off, so published ports don't appear as host sockets. Cosmetic |
 | `Last IDP: none in last 2000 log lines` | Only home-realm users authenticated recently — normal on a quiet connector |
-| `URL: not set` | The portal's redirect doesn't point at its public address — set `PORTAL_URL` |
+| `URL: not set` | Nothing the portal is configured with names a public address. Common, because the portal can be served behind a load balancer, with its own SSL compose file, or over plain HTTP. Set `PORTAL_URL` |
 | `Public: unreachable` but the portal works | This server can't reach its own public address (common behind cloud load balancers) |
 | `RADIUS DB: unreachable` | The web container can't reach the connector's MySQL — check firewall rules for port 3306 between the two |
 | Logo looks like an oval | Terminal fonts differ in how tall each character cell is. Zoom one step out, or change line spacing |
