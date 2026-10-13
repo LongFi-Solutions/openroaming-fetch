@@ -64,7 +64,7 @@ Get the files onto the server one of two ways, then run the installer. Either wa
 If the server can reach GitHub:
 
 ```bash
-git clone https://github.com/preston-longfi/openroaming-fetch.git
+git clone https://github.com/LongFi-Solutions/openroaming-fetch.git
 cd openroaming-fetch
 sudo ./install.sh connector
 ```
@@ -76,7 +76,7 @@ If the server can't reach GitHub, or you'd rather not clone onto it, download th
 1. On your computer, get the repo, either by cloning it:
 
    ```bash
-   git clone https://github.com/preston-longfi/openroaming-fetch.git
+   git clone https://github.com/LongFi-Solutions/openroaming-fetch.git
    ```
 
    or by clicking **Code → Download ZIP** on the GitHub page and unzipping it. The unzipped folder is called `openroaming-fetch-main`.
