@@ -37,7 +37,7 @@ The RADIUS certificate is copied into the FreeRADIUS image at build time, so ren
 | Mode | The portal's platform mode — Live, or Demo in amber |
 | Processes | nginx, php-fpm and the Symfony scheduler inside the web container, each checked separately |
 | MySQL, Memcached | Container state |
-| URL / Public / Public TLS | The public portal address — detected from the portal's own redirect — checked from outside, with its certificate expiry |
+| URL / Public / Public TLS | The public portal address — detected from the portal's configuration, or set at install — checked from outside, with its certificate expiry |
 | Local web | The web container on port 80 |
 | RADIUS DB | Whether the web container can reach the connector's FreeRADIUS database (host and port only — credentials are never shown) |
 | Profile cert | The RADIUS server certificate embedded in every profile the portal hands out (amber inside 21 days) |
@@ -50,6 +50,8 @@ The RADIUS certificate is copied into the FreeRADIUS image at build time, so ren
 Nothing to install. Only tools already on a stock Ubuntu or Debian host:
 
 `bash` · `docker` · `openssl` · `curl` · `ss` · `nsenter` · `timeout`
+
+Tested on Ubuntu 24.04 with the connector's hybrid deployment and the portal's prebuilt Docker image. Other Debian-based hosts should work the same.
 
 **neofetch is not required** — this only borrows the layout. A 24-bit colour terminal shows the logo in the real OpenRoaming colours; anything else gets the closest match.
 
@@ -91,7 +93,7 @@ If the server can't reach GitHub, or you'd rather not clone onto it, download th
 
    ```bash
    ssh you@your-server
-   cd /tmp/openroaming-fetch
+   cd /tmp/openroaming-fetch        # or /tmp/openroaming-fetch-main for a ZIP download
    sudo bash install.sh connector
    ```
 
@@ -119,10 +121,18 @@ git pull && sudo ./install.sh connector
 
 With a copy, copy the folder across again (step 2 above) and re-run `sudo bash install.sh connector` from it.
 
-To remove it:
+To remove it, from a copy of the repo:
 
 ```bash
 sudo ./install.sh connector --uninstall
+```
+
+That keeps your settings file in case you reinstall. If you've already deleted the copy, remove the three pieces by hand:
+
+```bash
+sudo rm -f /usr/local/bin/openroaming-fetch-connector \
+           /etc/update-motd.d/99-openroaming-fetch-connector \
+           /etc/default/openroaming-fetch-connector
 ```
 
 ### Login banner
