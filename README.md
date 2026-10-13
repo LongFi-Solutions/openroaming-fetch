@@ -171,7 +171,11 @@ Worth knowing:
 
 ### Why root
 
-Docker queries, reading certificates, and counting sessions inside the radsecproxy container all need root. Without it every lookup degrades to `n/a` rather than failing. Login banners run as root via `pam_motd`, so they get the full picture with no extra setup.
+Docker queries, reading certificates, and counting sessions inside the radsecproxy container all need root. It doesn't matter which folder you run it from — only who runs it.
+
+- **Login banners** run as root via `pam_motd`, so they get the full picture with no extra setup.
+- **Run by hand as an ordinary user**, the banner re-runs itself under `sudo` if your account can use sudo without a password, which is the norm for cloud admin logins. Set `OPENROAMING_FETCH_NO_SUDO=1` to stop it doing that.
+- **Otherwise** it shows what an ordinary user can see, with the Docker and certificate rows as `n/a`, and a note at the bottom to run it with `sudo`.
 
 ---
 
@@ -199,7 +203,7 @@ Each file lists every setting, commented out. Uncomment a line to override it. T
 
 | Symptom | Cause |
 |---|---|
-| Everything after `Disk` shows `n/a` | Not running as root |
+| Everything after `Disk` shows `n/a`, with a note to use sudo | Run by an ordinary user whose account needs a password for sudo. Run `sudo openroaming-fetch-connector` |
 | Containers show `not found` | Not a Compose deployment, or a different Compose project — set `COMPOSE_PROJECT` |
 | `Listening` ports red on a working connector | Docker's userland proxy is off, so published ports don't appear as host sockets. Cosmetic |
 | `Last IDP: none in last 2000 log lines` | Only home-realm users authenticated recently — normal on a quiet connector |

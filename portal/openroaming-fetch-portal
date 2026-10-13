@@ -10,6 +10,16 @@
 #
 #   sudo openroaming-fetch-portal
 
+# ---- root -------------------------------------------------------------------
+# Docker, the certificates and the container namespaces all need root. Run as an
+# ordinary user, every one of those rows would just read n/a — so if sudo works without
+# a password (true of most cloud admin accounts), quietly re-run under it. If it
+# doesn't, carry on with what an ordinary user can see and say so at the bottom.
+# Set OPENROAMING_FETCH_NO_SUDO=1 to stop it trying.
+if [ "$(id -u)" -ne 0 ] && [ -z "${OPENROAMING_FETCH_NO_SUDO:-}" ] && sudo -n true 2>/dev/null; then
+  exec sudo -n -- "$0" "$@"
+fi
+
 # ---- deployment settings ----------------------------------------------------
 # Override any of them from the environment:
 #
@@ -343,6 +353,10 @@ row "Cert expires" "${SIGNING_EXP:-n/a}"
 row "Users"        "${USERS:-n/a}"
 row "Profiles"     "${PROFILES:-n/a}"
 blank
+if [ "$(id -u)" -ne 0 ]; then
+  row "Note"       "${AMBER}not running as root — run with sudo for the full readout${R}"
+  blank
+fi
 row "Repo"         "$REPO_URL"
 row "Support"      "$SUPPORT"
 
